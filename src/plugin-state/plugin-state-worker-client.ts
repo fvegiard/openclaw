@@ -44,7 +44,11 @@ async function execute<T>(
       });
       return result === undefined ? missing() : result;
     }
-    return await runOpenClawStateWorkerOperation(context, operation);
+    // Writable operations, including comparison observations, must share the
+    // host lifecycle owner before dispatch so sibling maintenance cannot overtake them.
+    return await runOpenClawStateWorkerOperation(context, operation, {
+      requireStateLifecycle: true,
+    });
   } catch (error) {
     throw wrapPluginStateError(
       error,
