@@ -6,6 +6,7 @@ import {
   resolveAgentRunFailureText,
 } from "../../../auto-reply/reply/agent-runner-failure-reply.js";
 import { assertCurrentSessionTranscriptHeader } from "../../../config/sessions/session-entry-codec.js";
+import { createDeferredCore } from "../../../shared/deferred.js";
 import { buildAgentRunTerminalOutcomeFromLifecycleEvent } from "../../agent-run-terminal-outcome.js";
 import { FailoverError } from "../../failover-error.js";
 import { AgentHarnessPreflightError } from "../../harness/errors.js";
@@ -92,6 +93,46 @@ function makeParams(overrides: FixtureOptions = {}): Params {
 }
 
 describe("handleEmbeddedPromptFailure", () => {
+  it("explains retry exhaustion without changing structured provider facts", async () => {
+    const providerError = "429 rate limit exceeded. Please try again in 221ms.";
+    const original = new FailoverError(providerError, {
+      reason: "rate_limit",
+      status: 429,
+      code: "rate_limit_exceeded",
+      rawError: providerError,
+      provider: "mock",
+      model: "model",
+      suspend: true,
+    });
+    const params = makeParams({
+      promptError: original,
+      failover: { advanceAuthProfile: vi.fn(async () => false) },
+    });
+    params.rateLimitRetriesExhausted = 9;
+    const failure: unknown = await handleEmbeddedPromptFailure(params).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      message: expect.stringContaining("9 automatic retries"),
+      rateLimitRetriesExhausted: 9,
+      reason: "rate_limit",
+      status: 429,
+      code: "rate_limit_exceeded",
+      rawError: providerError,
+      provider: "mock",
+      model: "model",
+      suspend: true,
+    });
+    expect(original.message).toBe(providerError);
+    expect(
+      buildKnownAgentRunFailureReplyPayload({
+        err: failure,
+        sessionCtx: {},
+        resolvedVerboseLevel: "off",
+      })?.text,
+    ).toContain("9 automatic retries");
+  });
+
   it("preserves terminal preflight identity and public copy despite a retryable diagnostic", async () => {
     const diagnostic = new Error("404 No managed agent resource found: session-fixture");
     const userMessage =
@@ -375,10 +416,7 @@ describe("handleEmbeddedPromptFailure", () => {
 
   it("returns the profile-rotation retry before failure marking finishes", async () => {
     const events: string[] = [];
-    let releaseMark: (() => void) | undefined;
-    const markCanFinish = new Promise<void>((resolve) => {
-      releaseMark = resolve;
-    });
+    const { promise: markCanFinish, resolve: releaseMark } = createDeferredCore();
     const maybeMarkAuthProfileFailure = vi.fn(async () => {
       events.push("mark-start");
       await markCanFinish;

@@ -25,8 +25,12 @@ import { captureGatewayOperatorRunAuthority } from "../operator-run-authority.js
 import { createGatewayBroadcaster } from "../server-broadcast.js";
 import { GatewayClientRegistry } from "../server/client-registry.js";
 import type { GatewayWsClient } from "../server/ws-types.js";
-import { canReceiveSessionEvent } from "../session-sharing.js";
-import { roleClient, rolePolicyConfig } from "../session-sharing.test-utils.js";
+import { createSessionRowProjection } from "../session-row-projection.js";
+import {
+  createProjectedSessionEventPredicate,
+  roleClient,
+  rolePolicyConfig,
+} from "../session-sharing.test-utils.js";
 import {
   adminRequestClient,
   broadcast,
@@ -159,9 +163,7 @@ it("keeps a trusted narrow question on worker-backed RPCs and fanout through lab
     );
     const admin = questionPeer(adminRequestClient, "sql-admin");
     const revoked = questionPeer({ ...f.viewer, invalidated: true }, "sql-revoked");
-    const fallback = vi.fn((client, sessionKeys, agentId, event, payload) =>
-      canReceiveSessionEvent({ cfg: f.cfg, client, sessionKeys, agentId, event, payload }),
-    );
+    const fallback = vi.fn(() => false);
     const broadcaster = createGatewayBroadcaster({
       clients: new GatewayClientRegistry([owner.ws, viewer.ws, broad.ws, admin.ws, revoked.ws]),
       canReceiveSessionEvent: fallback,
@@ -259,10 +261,12 @@ it("fans out requester-only questions after draft visibility changes with no glo
       { ...f.owner, connect: { ...f.owner.connect, scopes: ["operator.questions"] } },
       "broad-questions",
     );
+    const projection = await createSessionRowProjection({ cfg: f.cfg });
+    sourceReleases.add(() => projection.dispose());
+    await projection.ensureMaterialized();
     const broadcaster = createGatewayBroadcaster({
       clients: new GatewayClientRegistry([owner.ws, viewer.ws, broad.ws]),
-      canReceiveSessionEvent: (client, sessionKeys, agentId, event, payload) =>
-        canReceiveSessionEvent({ cfg: f.cfg, client, sessionKeys, agentId, event, payload }),
+      canReceiveSessionEvent: createProjectedSessionEventPredicate(f.cfg, projection),
     });
     broadcast.mockImplementation(broadcaster.broadcast);
     expect((await f.request())[0]).toBe(true);

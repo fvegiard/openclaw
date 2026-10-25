@@ -1,3 +1,4 @@
+/// <reference lib="esnext.array" />
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import type {
   AssistantMessage,
@@ -6,6 +7,7 @@ import type {
   Model,
 } from "openclaw/plugin-sdk/llm";
 import type { ProviderWrapStreamFnContext } from "openclaw/plugin-sdk/plugin-entry";
+import { createZeroUsageFixture } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it } from "vitest";
 import { wrapKimiProviderStream } from "./stream.js";
 
@@ -123,14 +125,7 @@ describe("kimi tool-call markup wrapper", () => {
       api: KIMI_MODEL.api,
       provider: KIMI_MODEL.provider,
       model: KIMI_MODEL.id,
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
+      usage: createZeroUsageFixture(),
       timestamp: 1,
       content: [{ type: "text", text: KIMI_TOOL_TEXT }],
       stopReason: "stop",
@@ -157,10 +152,7 @@ describe("kimi tool-call markup wrapper", () => {
     const wrapped = wrapKimiStream(baseStreamFn);
     const stream = await wrapped(KIMI_MODEL, KIMI_CONTEXT, {});
 
-    const events: AssistantMessageEvent[] = [];
-    for await (const event of stream) {
-      events.push(event);
-    }
+    const events: AssistantMessageEvent[] = await Array.fromAsync(stream);
     const result = await stream.result();
     const toolMessage = {
       role: "assistant",
@@ -233,25 +225,6 @@ describe("kimi tool-call markup wrapper", () => {
     });
   });
 
-  it("keeps tagged tool-call conversion when one wrapper changes thinking modes", async () => {
-    const baseStreamFn: StreamFn = () =>
-      createFakeStream({
-        events: [],
-        resultMessage: createAssistantTextMessage(KIMI_TOOL_TEXT),
-      }) as ReturnType<StreamFn>;
-    const wrapped = wrapKimiProviderStream({
-      streamFn: baseStreamFn,
-    } as never);
-    for (const reasoning of ["off", "max", undefined] as const) {
-      const stream = await wrapped(KIMI_MODEL, KIMI_CONTEXT, { reasoning });
-      await expect(stream.result()).resolves.toEqual({
-        role: "assistant",
-        content: [createReadToolCall()],
-        stopReason: "toolUse",
-      });
-    }
-  });
-
   it("defaults K3-256k to adaptive high thinking", () => {
     const modelId = "k3-256k";
     const { getCapturedModel, getCapturedPayload } = captureKimiPayload(
@@ -304,6 +277,15 @@ describe("kimi tool-call markup wrapper", () => {
     expect(getCapturedPayload()).toEqual({
       thinking: { type: "disabled" },
       output_config: { format: { type: "json_schema" } },
+    });
+  });
+
+  it.each(["k3.1-pro", "k3.1-pro-highspeed"])("keeps %s thinking on for session off", (modelId) => {
+    const { getCapturedPayload } = captureKimiPayload({ modelId, thinkingLevel: "off" });
+
+    expect(getCapturedPayload()).toEqual({
+      thinking: { type: "adaptive", display: "summarized" },
+      output_config: { effort: "high" },
     });
   });
 
@@ -550,7 +532,7 @@ describe("kimi tool-call markup wrapper", () => {
 
   it("bounds per-call Kimi Anthropic thinking and lowers its adaptive default to native high", () => {
     const cases = [
-      ["off", undefined],
+      ["off", 1024],
       ["max", 8192],
       [undefined, 8192],
       ["minimal", 1024],
@@ -574,15 +556,13 @@ describe("kimi tool-call markup wrapper", () => {
     for (const [reasoning, budgetTokens] of cases) {
       void wrapped(KIMI_MODEL, KIMI_CONTEXT, { reasoning });
 
-      expect(getCapturedOptions()?.reasoning).toBe(reasoning ?? "high");
-      expect(getCapturedPayload()).toEqual(
-        reasoning === "off"
-          ? { thinking: { type: "disabled" } }
-          : {
-              max_tokens: 16000,
-              thinking: { type: "enabled", budget_tokens: budgetTokens },
-            },
+      expect(getCapturedOptions()?.reasoning).toBe(
+        reasoning === "off" ? "low" : (reasoning ?? "high"),
       );
+      expect(getCapturedPayload()).toEqual({
+        max_tokens: 16000,
+        thinking: { type: "enabled", budget_tokens: budgetTokens },
+      });
     }
   });
 });

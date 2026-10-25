@@ -128,7 +128,9 @@ suite.define(() => {
         async ({ page }) => {
           let currentSocket: WebSocket | undefined;
           let latestDiscovery: { socket: WebSocket; id: string; complete: boolean } | undefined;
-          let latestHistory: { socket: WebSocket; id: string; complete: boolean } | undefined;
+          let latestHistory:
+            | { socket: WebSocket; id: string; complete: boolean; initialHistory: boolean }
+            | undefined;
           page.on("websocket", (socket) => {
             currentSocket = socket;
             socket.on("framesent", ({ payload }) => {
@@ -136,13 +138,21 @@ suite.define(() => {
               if (frame.type !== "req" || typeof frame.id !== "string") {
                 return;
               }
-              if (frame.method === "chat.startup" || frame.method === "chat.history") {
-                latestHistory = { socket, id: frame.id, complete: false };
+              const params = requireRecord(frame.params);
+              const initialHistory =
+                frame.method === "sessions.messages.subscribe" &&
+                params.key === key &&
+                params.initialHistory !== undefined;
+              if (
+                initialHistory ||
+                ((frame.method === "chat.startup" || frame.method === "chat.history") &&
+                  params.sessionKey === key)
+              ) {
+                latestHistory = { socket, id: frame.id, complete: false, initialHistory };
               }
               if (frame.method !== "sessions.catalog.list") {
                 return;
               }
-              const params = requireRecord(frame.params);
               if (params.agentId === "main" && params.metadataOnly === true && !params.catalogId) {
                 latestDiscovery = { socket, id: frame.id, complete: false };
               }
@@ -163,7 +173,16 @@ suite.define(() => {
                 frame.id === latestHistory.id &&
                 latestHistory.socket === socket
               ) {
-                const historyResult = frame.ok === true ? requireRecord(frame.payload) : undefined;
+                const result = frame.ok === true ? requireRecord(frame.payload) : undefined;
+                const initialHistory =
+                  result && latestHistory.initialHistory
+                    ? requireRecord(result.initialHistory)
+                    : undefined;
+                const historyResult = latestHistory.initialHistory
+                  ? initialHistory?.ok === true
+                    ? requireRecord(initialHistory.payload)
+                    : undefined
+                  : result;
                 latestHistory.complete =
                   historyResult !== undefined &&
                   historyResult.kind !== "reset" &&
@@ -193,9 +212,7 @@ suite.define(() => {
           await expect.poll(() => model.getAttribute("aria-disabled")).toBe("false");
           await model.click();
           // A failed background refresh must not add chrome above a usable list.
-          await revealChatModelOption(
-            composer.locator('[data-chat-model-option="openai/gpt-5.4"]'),
-          );
+          await revealChatModelOption(composer, "openai/gpt-5.4");
           if (route === "new") {
             // An absent CLI group can mean discovery has not started, or a completed empty result.
             await expect
@@ -263,20 +280,18 @@ suite.define(() => {
                   return false;
                 }
                 const rendered = await page.evaluate(
-                  ({ key: expectedKey, sessionId: expectedSessionId }) => {
+                  async ({ key: expectedKey, sessionId: expectedSessionId }) => {
                     const pane = document.querySelector<
                       HTMLElement & {
                         state?: ChatPageHost;
                         transcriptReady: boolean;
-                        hasUpdated: boolean;
-                        isUpdatePending: boolean;
+                        updateComplete: Promise<unknown>;
                       }
                     >('openclaw-chat-pane[aria-hidden="false"]');
+                    await pane?.updateComplete;
                     const state = pane?.state;
                     return (
-                      pane?.hasUpdated === true &&
-                      !pane.isUpdatePending &&
-                      pane.transcriptReady &&
+                      pane?.transcriptReady &&
                       state?.sessionKey === expectedKey &&
                       state.currentSessionId === expectedSessionId &&
                       !state.chatLoading

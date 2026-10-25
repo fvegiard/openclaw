@@ -42,6 +42,7 @@ const CONTROL_UI_CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".mp4": "video/mp4",
   ".ico": "image/x-icon",
   ".txt": "text/plain; charset=utf-8",
   ".wasm": "application/wasm",
@@ -79,19 +80,23 @@ type ControlUiRepresentation = {
   encoding?: ControlUiContentEncoding;
 };
 
-export function resolveControlUiRepresentation(params: {
+export function resolveControlUiAssetEncodings(params: {
   req: IncomingMessage;
-  asset: ControlUiRootAsset;
   contentPath: string;
   precompressed: boolean;
-}): ControlUiRepresentation | null {
-  const { req, asset, precompressed } = params;
-  const encodings = resolveHttpContentEncodings(
-    req.headers?.["accept-encoding"],
-    precompressed && isControlUiCompressibleAsset(params.contentPath)
+}): ControlUiRepresentationEncoding[] {
+  return resolveHttpContentEncodings(
+    params.req.headers?.["accept-encoding"],
+    params.precompressed && isControlUiCompressibleAsset(params.contentPath)
       ? CONTROL_UI_DYNAMIC_ENCODINGS
       : new Set<ControlUiContentEncoding>(),
   );
+}
+
+export function resolveControlUiRepresentation(
+  asset: ControlUiRootAsset,
+  encodings: readonly ControlUiRepresentationEncoding[],
+): ControlUiRepresentation | null {
   // A missing sidecar changes availability, not this request's encoding preferences.
   for (const selected of encodings) {
     if (selected === "identity") {
@@ -239,7 +244,6 @@ export async function sendControlUiHtmlBody(
   res: ServerResponse,
   body: string,
   isCurrent?: () => boolean,
-  staleRedirectPath?: string,
 ) {
   const encoding = resolveControlUiHtmlEncoding(req);
   if (encoding === "not-acceptable") {
@@ -255,18 +259,10 @@ export async function sendControlUiHtmlBody(
   }
   if (isCurrent && !isCurrent()) {
     res.removeHeader("Content-Encoding");
-    if (!staleRedirectPath) {
-      respondPlainText(res, 403, "Session access changed. Reload the conversation.");
-      return;
-    }
-    // A session entry re-enters through its plain app path, where the normal
-    // auth gate decides access; the prepared entry document is never sent.
-    res.statusCode = 303;
-    res.setHeader("Location", staleRedirectPath);
     res.setHeader("Cache-Control", "no-store");
-    res.removeHeader("Content-Type");
     res.removeHeader("Content-Security-Policy");
-    res.end();
+    res.removeHeader("X-OpenClaw-Session-Entry");
+    respondPlainText(res, 403, "Session access changed. Reload the conversation or log in again.");
     return;
   }
   res.end(encoded);

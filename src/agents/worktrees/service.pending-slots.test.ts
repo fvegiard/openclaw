@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import { hostname } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -10,6 +9,7 @@ import {
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as backoff from "../../infra/backoff.js";
 import * as gitExec from "../../infra/git-exec.js";
+import * as gitWorker from "../../infra/git-worker.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import { SqliteWorkerError } from "../../infra/sqlite-worker-contract.js";
 import { CommandProcessCleanupError } from "../../process/exec-result.js";
@@ -109,13 +109,13 @@ describe("managed worktree pending slots", () => {
           db,
           getNodeSqliteKysely<Pick<DB, "state_leases">>(db)
             .updateTable("state_leases")
-            .set({
-              payload_json: JSON.stringify({
-                state: "pending",
-                record,
-                owner: { pid: 2147483647, host: hostname(), startedAt: null },
-              }),
-            })
+            .set((eb) => ({
+              payload_json: eb.fn<string>("json_set", [
+                eb.ref("payload_json"),
+                eb.val("$.owner.pid"),
+                eb.val(2_147_483_647),
+              ]),
+            }))
             .where("scope", "=", "core:managed-worktrees:pending-slots")
             .where("lease_key", "=", record.id),
         );
@@ -185,6 +185,23 @@ describe("managed worktree pending slots", () => {
       }
     },
   );
+
+  it("keeps Git dependency inspection outside capacity admission", async () => {
+    const run = gitWorker.runGitWorkerOperation;
+    vi.spyOn(gitWorker, "runGitWorkerOperation").mockImplementation(async (operation, options) => {
+      if (operation.type === "worktree.eviction-source") {
+        await stateLease.withOpenClawStateLeaseAsync(
+          { scope: WORKTREE_CREATE_LEASE_SCOPE, key: "capacity", leaseMs: 60_000, waitMs: 0 },
+          captureWorktreeRunEndContext(env),
+          async () => {},
+        );
+      }
+      return run(operation, options);
+    });
+    const created = await service.create({ repoRoot, name: "source-inspection", baseRef: "HEAD" });
+    expect(await fs.readFile(path.join(created.path, "README.md"), "utf8")).toBe("base\n");
+    expect(await readPendingWorktrees(env)).toEqual([]);
+  });
 
   it("keeps Git name discovery outside capacity admission", async ({ signal }) => {
     const entered = createDeferred();

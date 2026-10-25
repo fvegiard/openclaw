@@ -26,8 +26,8 @@ import { settleDeniedRepositoryGitHubPublication } from "./github-repository-pub
 import { terminalRepositoryGitHubPublication } from "./github-repository-publication-store.js";
 import {
   assertReceiptOwner,
-  prepareReceiptOwner,
   captureCheckpoint,
+  prepareReceiptOwner,
 } from "./github-repository-publication-workspace.js";
 
 export function createRepositoryGitHubPublicationExecution(params: {
@@ -153,11 +153,15 @@ export function createRepositoryGitHubPublicationExecution(params: {
             );
           }
           assertExecution();
+          const actor = action ? undefined : getRequester().snapshot.actor;
           return await executeRepositoryGitHubPublication({
             execution: await claimExecution(),
+            requesterProfileId:
+              action?.owner ?? (actor?.kind === "operator" ? actor.profileId : undefined),
             snapshot: prepared.snapshot,
             snapshotRoot: prepared.snapshotRoot,
             storePath: loaded.storePath,
+            readCurrentEntry: () => assertReceiptOwner(row, preparedOwner).loaded.entry,
             assertWorkflowChangesAllowed: bound
               ? assertExecution
               : () => assertGitHubPublicationWorkflowChangesAllowed(getRequester()),

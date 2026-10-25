@@ -10,6 +10,7 @@ import type {
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { DevicePlacementRequirement } from "../../agents/harness/types.js";
 import type { RequiredSessionPlacementAdmission } from "../../agents/session-placement-admission.types.js";
+import type { SessionSourceAssertion } from "../../config/sessions/session-source-authority.js";
 import type {
   WorkerDesktopApp,
   WorkerMachineOption,
@@ -180,6 +181,8 @@ export type WorkerEnvironmentServiceContract = {
     runSetupScript?: boolean,
   ): Promise<WorkerEnvironmentServiceRecord>;
   destroy(environmentId: string): Promise<WorkerEnvironmentServiceRecord>;
+  /** Stop session work and return after provider acceptance; physical cleanup remains owned. */
+  reclaim(environmentId: string): Promise<WorkerEnvironmentServiceRecord>;
   destroyUnattached(environmentId: string): Promise<WorkerEnvironmentServiceRecord>;
   observeDesktop(request: {
     environmentId: string;
@@ -212,7 +215,7 @@ export type WorkerPlacementDispatchRequest = WorkerSessionPlacementDispatchIdent
 export type WorkerPlacementDispatchAdmission = <T>(
   request: Pick<WorkerPlacementDispatchRequest, "sessionId" | "sessionKey" | "agentId">,
   run: (signal?: AbortSignal, assertSessionCurrent?: () => void) => Promise<T>,
-  authorize?: () => void,
+  authorize?: SessionSourceAssertion,
   signal?: AbortSignal,
 ) => Promise<T>;
 

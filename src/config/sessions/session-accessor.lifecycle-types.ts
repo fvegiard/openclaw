@@ -144,6 +144,8 @@ type SessionEntryLifecycleRemovalBase = {
   archiveRemovedTranscript?: boolean;
   /** Omit removal when the transcript changed after the caller's positive classification. */
   expectedTranscriptSnapshot?: SessionStateDeleteSnapshot;
+  /** Memory cleanup rechecks message absence at the actor deletion boundary. */
+  requiresMissingTranscript?: true;
   expectedSessionId?: string;
   expectedLifecycleRevision?: string;
   expectedUpdatedAt?: number;
@@ -187,11 +189,6 @@ export type SessionEntryLifecycleUpsert = {
       entry?: never;
     }
 );
-
-export type SessionArchivedTranscriptCleanupRule = {
-  reason: "deleted" | "reset";
-  olderThanMs: number;
-};
 
 export type SessionEntryLifecycleMutationResult = {
   beforeCount: number;

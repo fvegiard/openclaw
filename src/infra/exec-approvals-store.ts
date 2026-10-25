@@ -53,12 +53,14 @@ import {
   withExecApprovalsPublication,
 } from "./exec-approvals-publication.js";
 import type { RemovedExecApprovalPolicies } from "./exec-approvals-retirement.worker.js";
+import { attachExecApprovalsSocket } from "./exec-approvals-socket.js";
 import {
   snapshotFromExecApprovalsDatabase,
   warnFailClosed,
   assertExecApprovalsMutationAllowed,
   serializeExecApprovals,
   snapshotFromExecApprovalsRow,
+  snapshotFromReadReply,
   writeExecApprovalsConfigRow,
 } from "./exec-approvals-sqlite.js";
 import { hasSqliteWorkerOutcomeUnknown } from "./sqlite-worker-contract.js";
@@ -196,21 +198,6 @@ export function readExecApprovalsSnapshot(): ExecApprovalsSnapshot {
   }
 }
 
-function snapshotFromReadReply(
-  reply: Awaited<ReturnType<typeof executeExistingOpenClawStateRead>>,
-  displayPath: () => string,
-): ExecApprovalsSnapshot {
-  if (reply && (!reply.ok || reply.type !== "exec-approvals.read")) {
-    throw new Error("Unexpected exec approvals read result");
-  }
-  return snapshotFromExecApprovalsRow({
-    path: displayPath(),
-    row: reply?.row,
-    onMalformed: () =>
-      warnFailClosed("exec approvals SQLite row is malformed; denying host execution"),
-  });
-}
-
 export async function readExecApprovalsSnapshotAsync(
   context = captureOpenClawStateWorkerContext(),
 ): Promise<ExecApprovalsSnapshot> {
@@ -328,26 +315,15 @@ export async function readExecApprovalsPolicyReadOnlyAsync(
   }
 }
 
-type NativeExecApprovalsUpdate = {
-  baseHash?: string;
-  update: (file: ExecApprovalsFile) => ExecApprovalsFile | null;
-  assertCurrent?: () => void;
-};
-
 /** Doctor retains its synchronous native migration transaction. Runtime edits use the writer. */
 export function updateExecApprovalsForMaintenance(
-  params: NativeExecApprovalsUpdate,
-  options: OpenClawStateDatabaseOptions = {},
-): ExecApprovalsSnapshot | null {
+  update: (file: ExecApprovalsFile) => ExecApprovalsFile | null,
+): ExecApprovalsSnapshot {
   assertNoPendingLegacyExecApprovals();
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
-      params.assertCurrent?.();
       const current = snapshotFromExecApprovalsDatabase(db);
-      if (params.baseHash !== undefined && current.hash !== params.baseHash) {
-        return null;
-      }
-      const next = params.update(structuredClone(current.file));
+      const next = update(structuredClone(current.file));
       if (next === null) {
         return current;
       }
@@ -366,10 +342,9 @@ export function updateExecApprovalsForMaintenance(
         row: { raw_json: persistedRaw },
       });
       stageCronExecHostPolicyPublication(db, snapshot.file);
-      params.assertCurrent?.();
       return snapshot;
     },
-    options,
+    undefined,
     { operationLabel: "exec-approvals.update" },
   );
 }
@@ -444,7 +419,7 @@ async function mutateExecPolicy<Key extends keyof PolicyMutationOperations>(
   }
 }
 
-export function updateExecApprovals(
+export async function updateExecApprovals(
   params: {
     baseHash?: string;
     update: ExecApprovalsMutation;
@@ -453,15 +428,24 @@ export function updateExecApprovals(
   },
   context = captureOpenClawStateWorkerContext(),
 ): Promise<ExecApprovalsSnapshot | null> {
-  return mutateExecPolicy(
+  const { update, assertCurrent, assertPreparationCurrent } = params;
+  const snapshot = await mutateExecPolicy(
     context,
-    {
-      type: "execApprovals.update",
-      input: { baseHash: params.baseHash, update: params.update },
-    },
-    params.assertCurrent,
-    params.assertPreparationCurrent,
+    { type: "execApprovals.update", input: { baseHash: params.baseHash, update } },
+    assertCurrent,
+    assertPreparationCurrent,
   );
+  if (!snapshot || update.kind !== "replace" || !update.preserveSocket) {
+    return snapshot;
+  }
+  try {
+    return await attachExecApprovalsSocket(snapshot, context, assertCurrent, update.file.socket);
+  } catch (cause) {
+    throw new Error(
+      "Exec approval policy was saved, but local socket credentials could not be updated. Run openclaw approvals get --json to inspect current state before retrying.",
+      { cause },
+    );
+  }
 }
 
 type CommittedExecAuthorization = {
@@ -549,23 +533,20 @@ function enqueueExecAuthorization(
         });
         return pending.map((item, index) => {
           const result = results[index];
-          try {
-            if (!result?.ok) {
-              throw new Error(result?.message ?? "Missing exec authorization result");
-            }
-            item.policy.seed(result.snapshot.file);
+          if (!result?.ok) {
             return () =>
-              item.resolve({
-                snapshot: result.snapshot,
-                readCurrent: () => {
-                  item.signal?.throwIfAborted();
-                  item.assertCurrent?.();
-                  return item.policy.read();
-                },
-              });
-          } catch (error) {
-            return () => item.reject(error);
+              item.reject(new Error(result?.message ?? "Missing exec authorization result"));
           }
+          item.policy.seed(result.snapshot.file);
+          return () =>
+            item.resolve({
+              snapshot: result.snapshot,
+              readCurrent: () => {
+                item.signal?.throwIfAborted();
+                item.assertCurrent?.();
+                return item.policy.read();
+              },
+            });
         });
       },
       {
@@ -582,6 +563,7 @@ function enqueueExecAuthorization(
               [context.admission.databasePath],
             )(operation),
           context,
+          pending,
         ),
       },
     ).then(
@@ -726,12 +708,13 @@ export function restoreExecApprovalsSnapshotLocked(
   );
 }
 
-export function ensureExecApprovalsSnapshot(
+export async function ensureExecApprovalsSnapshot(
   assertCurrent?: () => void,
   assertPreparationCurrent = assertCurrent,
 ): Promise<ExecApprovalsSnapshot> {
-  return mutateExecPolicy(
-    captureOpenClawStateWorkerContext(),
+  const context = captureOpenClawStateWorkerContext();
+  const snapshot = await mutateExecPolicy(
+    context,
     {
       type: "execApprovals.ensureSnapshot",
       input: undefined,
@@ -739,4 +722,5 @@ export function ensureExecApprovalsSnapshot(
     assertCurrent,
     assertPreparationCurrent,
   );
+  return attachExecApprovalsSocket(snapshot, context, assertCurrent);
 }
