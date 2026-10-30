@@ -191,7 +191,7 @@ export type PluginRuntimeCore = {
   version: string;
   /** Optional host behavior guarantees; absent capabilities remain unsupported on older hosts. */
   readonly capabilities?: readonly string[];
-  decisions: import("../../decisions/types-v2.js").DecisionRuntimeV2;
+  decisions: import("../../decisions/runtime-types.js").DecisionRuntimeV2;
   config: {
     /** Current process runtime config snapshot. Prefer config passed into the active call path. */
     current: {
@@ -364,6 +364,8 @@ export type PluginRuntimeCore = {
       ) => RuntimeSessionStoreEntrySummary[];
       /** Read-only metadata listing; saved prompts and other detached snapshots are omitted. */
       listSessionEntriesAsync: typeof import("../../plugin-sdk/session-store-runtime.js").listSessionEntriesAsync;
+      /** Exact selected entries retained through a synchronous disclosure callback. */
+      withSessionEntriesAsync: typeof import("../../plugin-sdk/session-store-runtime.js").withSessionEntriesAsync;
       createSessionEntryListReader: (params: {
         agentId: string;
         storePath: string;
@@ -449,7 +451,7 @@ export type PluginRuntimeCore = {
   tts: {
     /** Await machine preference preparation before rendering; optional for older custom runtimes. */
     buildSystemPromptHintAsync?: TtsRuntimeApi["buildTtsSystemPromptHintAsync"];
-    prepareTtsRequest: TtsRuntimeApi["prepareTtsRequest"];
+    prepareTtsRequest: typeof import("../../tts/tts-request.js").prepareTtsRequest;
     textToSpeech: typeof import("../../tts/tts.js").textToSpeech;
     textToSpeechStream: TtsRuntimeApi["textToSpeechStream"];
     textToSpeechTelephony: TtsRuntimeApi["textToSpeechTelephony"];
