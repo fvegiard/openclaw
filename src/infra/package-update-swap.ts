@@ -1,6 +1,5 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { movePathWithCopyFallback } from "@openclaw/fs-safe/atomic";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import { formatErrorMessage } from "./errors.js";
 import { retainMutationAuthority } from "./mutation-authority.js";
@@ -11,14 +10,12 @@ import {
 import { encodePackageActivationLauncher } from "./package-update-activation-journal.js";
 import { preparePackageActivation } from "./package-update-activation.js";
 import {
-  activateStagedNpmPackageRoot,
-  backupNpmPackageRoot,
   capturePackageLaunchers,
   type PackageLauncherBackup,
   discardPackageLauncherBackup,
   discardPackageUpdateBackup,
   copyPackagePathEntry as copyPathEntry,
-  PACKAGE_MANAGER_SWAP_SOURCE_HARDLINKS,
+  movePackageRoot,
   packagePathEntryExists as pathEntryExists,
   removePackagePath as removePath,
   restorePackageLauncher,
@@ -36,12 +33,18 @@ import {
   createNpmPackageRootLinkLifecycle,
   verifyRetainedNpmRootRecovery,
 } from "./package-update-npm-root.js";
+import { installStagedPackage } from "./package-update-release-switch.js";
 import {
   PackageUpdateActivationError,
   type PackageUpdateTransaction,
   type StagedPackageSwapResult,
   type StagedPackageSwapParams,
 } from "./package-update-swap-contract.js";
+import {
+  canExchangeStagedPackageRoot,
+  publishJournaledPackageRoot,
+  publishStagedPackageRoot,
+} from "./package-update-swap-publish.js";
 import { createPackageSwapResults } from "./package-update-swap-results.js";
 import {
   captureLegacyPackageBackupRetirement,
@@ -64,7 +67,13 @@ import { SystemPackageOwnershipError } from "./update-system-package-ownership.j
 
 export { removePackageUpdatePath } from "./package-update-filesystem.js";
 
-export async function swapStagedPackageInstall(
+/** Install a verified stage: the release switch where it can be used, otherwise the swap below. */
+export const swapStagedPackageInstall = (params: StagedPackageSwapParams) =>
+  params.stage.release || params.stage.releaseUnavailable
+    ? installStagedPackage(params, swapStagedPackageDirectory)
+    : swapStagedPackageDirectory(params);
+
+async function swapStagedPackageDirectory(
   params: StagedPackageSwapParams,
 ): Promise<StagedPackageSwapResult> {
   const startedAt = Date.now();
@@ -99,6 +108,9 @@ export async function swapStagedPackageInstall(
   let previousIdentity: PackageDirectoryIdentity | undefined;
   let rootLink: Awaited<ReturnType<typeof createNpmPackageRootLinkLifecycle>> | undefined;
   let packageBackedUp = false;
+  let publishByExchange = false;
+  let publicationUncertain = false;
+  let publication: string | null;
   let displacedCandidateRoot: string | undefined;
   const baseline = createPackageIntegrityReader(params.timeoutMs);
   const launchers: PackageLauncherBackup = { entries: [] };
@@ -121,6 +133,14 @@ export async function swapStagedPackageInstall(
     if (preparationCustody && !activation) {
       return [
         "Preparation custody is retained by the package recovery journal; run its repair command.",
+      ];
+    }
+    if (publicationUncertain) {
+      // Another writer changed the package path or its backup name mid-exchange:
+      // neither can be claimed, restored, or retired as this update's own.
+      packageRollbackVerified = false;
+      return [
+        `Package publication ended in an unknown state; inspect ${targetSwapRoot} and ${backupRoot} before restarting.`,
       ];
     }
     const messages: string[] = [];
@@ -301,12 +321,18 @@ export async function swapStagedPackageInstall(
         (await readPackageDistInventoryIfPresent(params.installTarget.packageRoot!)) ??
         (await collectPackageDistInventory(params.installTarget.packageRoot!));
     }
+    // One atomic exchange replaces a package directory with a staged one. The old
+    // tree then never leaves the package path before publication, so local
+    // overrides are captured from it there. A package link keeps the two moves:
+    // its ownership is proven on the moved entry.
+    publishByExchange =
+      hadPackage && !rootLink && (await canExchangeStagedPackageRoot(stagedSwapRoot));
     replayLocalOverrides = await preparePackageSwapLocalOverrides({
       ...params,
       hadPackage,
       rootLinked: Boolean(rootLink),
       targetSwapRoot,
-      backupRoot,
+      backupRoot: publishByExchange ? targetSwapRoot : backupRoot,
     });
     packageRollbackVerified = hadPackage && previousVersion !== null;
   };
@@ -509,6 +535,7 @@ export async function swapStagedPackageInstall(
             backupRoot,
             // Rollback snapshots remain recovery evidence even after successful restoration.
             databaseBackupRoot: rollbackResult ? undefined : transaction.databaseBackupRoot,
+            discardDatabaseCaptures: transaction.discardDatabaseCaptures,
             retireLegacyBackups: rollbackResult ? undefined : retireLegacyBackups,
             launchers,
             packageBackedUp,
@@ -558,16 +585,14 @@ export async function swapStagedPackageInstall(
       activePackageRoot = null;
       await removePath(targetSwapRoot, assertCurrent);
       if (hadPackage) {
-        await movePathWithCopyFallback({
-          from: backupRoot,
-          sourceHardlinks: PACKAGE_MANAGER_SWAP_SOURCE_HARDLINKS,
-          to: targetSwapRoot,
-          assertBeforeRename: assertCurrent,
-          assertBeforeMutation: assertCurrent,
-          onDestinationPublished: () => {
+        await movePackageRoot(backupRoot, targetSwapRoot, {
+          operation: "restore",
+          assertCaller: assertCurrent,
+          onPublished: () => {
             activePackageRoot = params.installTarget.packageRoot;
             assertCurrent();
           },
+          warn: (message) => warnings.push(message),
         });
       }
     };
@@ -583,19 +608,17 @@ export async function swapStagedPackageInstall(
       params.onLiveMutation?.();
       liveMutationStarted = true;
       packageRollbackVerified = false;
-      await activation.publish(false, async (previous, copied) => {
-        if (copied) {
-          warnings.push("EXDEV during package backup rename; using a verified rollback copy.");
-        }
-        previousRoot = { kind: "directory", tree: previous };
-        packageBackedUp = true;
-        activePackageRoot = null;
-        activation!.assertCurrent();
-        await replayLocalOverrides?.({
-          backupRoot,
-          packageRoot: path.join(activation!.anchor, "candidate"),
-        });
-        activation!.assertCurrent();
+      publication = await publishJournaledPackageRoot({
+        activation,
+        liveRoot: targetSwapRoot,
+        backupRoot,
+        warnings,
+        replayLocalOverrides,
+        onDisplaced: (previous) => {
+          previousRoot = { kind: "directory", tree: previous };
+          packageBackedUp = true;
+          activePackageRoot = null;
+        },
       });
       activePackageRoot = targetPackageRoot;
       projectActivated = true;
@@ -621,46 +644,27 @@ export async function swapStagedPackageInstall(
           previousRoot?.kind === "directory" ||
           previousIdentity !== undefined;
       };
-      if (hadPackage) {
-        if (native) {
-          await movePathWithCopyFallback({
-            from: targetSwapRoot,
-            sourceHardlinks: PACKAGE_MANAGER_SWAP_SOURCE_HARDLINKS,
-            to: backupRoot,
-            assertBeforeRename: assertForwardCurrent,
-            assertBeforeMutation: assertForwardCurrent,
-            onDestinationPublished: () => {
-              // A published copy owns compensation even if source cleanup is refused.
-              recordPackageBackup();
-              rollback.push(restorePackage);
-              assertForwardCurrent();
-            },
-          });
-        } else if (rootLink) {
-          assertForwardCurrent();
-          const acquisition = await rootLink.acquire();
-          if (!acquisition.acquired) {
-            activePackageRoot = null;
-            throw new Error(acquisition.error);
-          }
-        } else {
-          await backupNpmPackageRoot(targetSwapRoot, backupRoot, assertForwardCurrent, warnings);
-        }
-        if (!native) {
-          recordPackageBackup();
-        }
-      }
-      if (!native || !hadPackage) {
-        rollback.push(restorePackage);
-      }
-      await replayLocalOverrides?.();
-      await activateStagedNpmPackageRoot(stagedSwapRoot, targetSwapRoot, undefined, {
+      publication = await publishStagedPackageRoot({
+        stagedRoot: stagedSwapRoot,
+        liveRoot: targetSwapRoot,
+        backupRoot,
+        hadPackage,
+        native: native !== undefined,
+        rootLink,
+        exchange: publishByExchange,
         assertCaller: assertForwardCurrent,
+        warnings,
+        replayLocalOverrides,
+        onBackedUp: recordPackageBackup,
+        onRollbackOwed: () => rollback.push(restorePackage),
         onPublished: () => {
           activePackageRoot = targetPackageRoot;
           projectActivated = true;
         },
-        warnings,
+        onUnpublished: (uncertain) => {
+          activePackageRoot = null;
+          publicationUncertain ||= uncertain;
+        },
       });
       for (const shim of shims) {
         // Register before copying: replacing an entry can fail after removing it.
@@ -693,12 +697,17 @@ export async function swapStagedPackageInstall(
       : [
           hadPackage && !retained
             ? rootLink
-              ? await rootLink.retire()
+              ? ((await rootLink.retire())?.message ?? null)
               : await discardPackageUpdateBackup(backupRoot, "old package", targetLayout.globalRoot)
             : null,
           !retained ? await discardPackageLauncherBackup(launchers, targetLayout.globalRoot) : null,
         ];
-    return results.committed(activePackageRoot, hadPackage, cleanup, postVerifyStep);
+    return results.committed(
+      activePackageRoot,
+      hadPackage,
+      [publication, ...cleanup],
+      postVerifyStep,
+    );
   } catch (error) {
     if (hasCommandProcessCleanupError(error)) {
       throw error;

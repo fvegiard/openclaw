@@ -1,5 +1,6 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { sql } from "kysely";
+import { readBackgroundResultPlacement } from "../../../packages/agent-core/src/harness/session/background-result-placement.js";
 import {
   jsonObjectFieldsForScan,
   jsonScannedValue,
@@ -157,7 +158,7 @@ export function canRebasePreparedAssistantInTransaction(
             message: {
               role: true,
               excludeFromContext: true,
-              __openclaw: { contextFreeCommand: true },
+              __openclaw: { contextFreeCommand: true, humanAddressed: true },
               provenance: { kind: true, sourceChannel: true },
             },
           }).as("message_json"),
@@ -182,9 +183,11 @@ export function canRebasePreparedAssistantInTransaction(
       "provenance",
     ]).first;
     const internal = fields.get("__openclaw");
-    const command = scanJsonObjectFields(internal?.kind === "object" ? internal.text : "{}", [
-      "contextFreeCommand",
-    ]).first.get("contextFreeCommand");
+    const internalFields = scanJsonObjectFields(
+      internal?.kind === "object" ? internal.text : "{}",
+      ["contextFreeCommand", "humanAddressed"],
+    ).first;
+    const command = internalFields.get("contextFreeCommand");
     const provenance = fields.get("provenance");
     const source = scanJsonObjectFields(provenance?.kind === "object" ? provenance.text : "{}", [
       "kind",
@@ -202,6 +205,8 @@ export function canRebasePreparedAssistantInTransaction(
         readJsonPredicateScalar(command) === true
           ? 1
           : 0,
+      human_addressed:
+        readJsonPredicateScalar(internalFields.get("humanAddressed")) === true ? 1 : 0,
       provenance_kind: jsonScannedValue(source.get("kind")),
       provenance_source_channel: jsonScannedValue(source.get("sourceChannel")),
     };
@@ -235,6 +240,14 @@ export function resolveTranscriptEventAppendParent(
     appendIntent: "active-branch",
     parentId,
   });
+  const placement = readBackgroundResultPlacement(event);
+  if (placement) {
+    return {
+      ...event,
+      parentId: effectiveParentId,
+      data: { ...placement, afterEntryId: effectiveParentId },
+    };
+  }
   return effectiveParentId === parentId ? event : { ...event, parentId: effectiveParentId };
 }
 
@@ -244,9 +257,8 @@ export function resolveTranscriptMessageAppendParent<TMessage>(
   options: Pick<TranscriptMessageAppendOptions<TMessage>, "appendIntent" | "parentId">,
   prepared?: TranscriptAppendParentPreparation,
 ): string | null {
-  const tailId = readActiveTranscriptAppendParentId(database, sessionId, prepared);
   return resolveTranscriptAppendParent({
-    tailId,
+    readTailId: () => readActiveTranscriptAppendParentId(database, sessionId, prepared),
     parentId: options.parentId,
     appendIntent: options.appendIntent,
     isAncestor: (leafId, candidateId) =>

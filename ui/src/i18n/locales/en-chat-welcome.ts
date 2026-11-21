@@ -5,15 +5,13 @@ import { en } from "./en.ts";
 const catalog = {
   chat: {
     welcome: {
-      hintBeforeShortcut: "Type a message below ·",
-      hintAfterShortcut: "for commands",
-      recentSessions: "Recent chats",
+      recentSessions: "Recent sessions",
       suggestions: {
         whatCanYouDo: en.chat.welcome.suggestions.whatCanYouDo,
         summarizeRecentSessions: "Summarize my recent sessions",
         configureChannel: "Help me configure a channel",
         checkSystemHealth: "Check system health",
-        exploreOpenClaw: "Tour OpenClaw's code and docs",
+        exploreOpenClaw: "Tour OpenClaw’s code and docs",
         investigateInSandbox: "Investigate an issue in a sandbox",
         openDraftPullRequest: "Fix a bug and open a draft PR",
       },

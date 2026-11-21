@@ -5,7 +5,10 @@ import { discoverOpenClawPlugins } from "../discovery.js";
 import { loadPluginManifestRegistryCore } from "../manifest-registry.js";
 import { resolveBundledExplicitProviderContractsFromPublicArtifacts } from "../provider-contract-public-artifacts.js";
 import type { ProviderPlugin, WebFetchProviderPlugin, WebSearchProviderPlugin } from "../types.js";
-import { resolveBundledExplicitWebSearchProvidersFromPublicArtifacts } from "../web-provider-public-artifacts.explicit.js";
+import {
+  resolveBundledExplicitWebFetchProvidersFromPublicArtifacts,
+  resolveBundledExplicitWebSearchProvidersFromPublicArtifacts,
+} from "../web-provider-public-artifacts.explicit.js";
 import {
   BUNDLED_PLUGIN_CONTRACT_SNAPSHOTS,
   buildBundledPluginContractSnapshot,
@@ -87,8 +90,6 @@ export function getPluginRegistrationContracts(): PluginRegistrationContractEntr
     );
 }
 
-export let providerContractLoadError: Error | undefined;
-
 function formatBundledCapabilityPluginLoadError(params: {
   pluginId: string;
   capabilityLabel: string;
@@ -146,7 +147,9 @@ function loadScopedCapabilityRuntimeRegistryEntries<T>(params: {
   });
 }
 
-function loadProviderContractEntriesForPluginId(pluginId: string): ProviderContractEntry[] {
+export function resolveProviderContractEntriesForPluginId(
+  pluginId: string,
+): ProviderContractEntry[] {
   const publicArtifactEntries = resolveBundledExplicitProviderContractsFromPublicArtifacts({
     onlyPluginIds: [pluginId],
   });
@@ -154,23 +157,17 @@ function loadProviderContractEntriesForPluginId(pluginId: string): ProviderContr
     return publicArtifactEntries;
   }
 
-  try {
-    providerContractLoadError = undefined;
-    return loadScopedCapabilityRuntimeRegistryEntries({
-      pluginId,
-      capabilityLabel: "provider",
-      loadEntries: (registry) =>
-        registry.providers
-          .filter((entry) => entry.pluginId === pluginId)
-          .map((entry) => ({
-            pluginId: entry.pluginId,
-            provider: entry.provider,
-          })),
-    });
-  } catch (error) {
-    providerContractLoadError = error instanceof Error ? error : new Error(String(error));
-    return [];
-  }
+  return loadScopedCapabilityRuntimeRegistryEntries({
+    pluginId,
+    capabilityLabel: "provider",
+    loadEntries: (registry) =>
+      registry.providers
+        .filter((entry) => entry.pluginId === pluginId)
+        .map((entry) => ({
+          pluginId: entry.pluginId,
+          provider: entry.provider,
+        })),
+  });
 }
 
 function resolveWebSearchCredentialValue(provider: WebSearchProviderPlugin): unknown {
@@ -205,6 +202,17 @@ function resolveWebFetchCredentialValue(provider: WebFetchProviderPlugin): unkno
 export function resolveWebFetchProviderContractEntriesForPluginId(
   pluginId: string,
 ): WebFetchProviderContractEntry[] {
+  const publicArtifactEntries = resolveBundledExplicitWebFetchProvidersFromPublicArtifacts({
+    onlyPluginIds: [pluginId],
+  })?.map((provider) => ({
+    pluginId: provider.pluginId,
+    provider,
+    credentialValue: resolveWebFetchCredentialValue(provider),
+  }));
+  if (publicArtifactEntries) {
+    return publicArtifactEntries;
+  }
+
   return loadScopedCapabilityRuntimeRegistryEntries({
     pluginId,
     capabilityLabel: "web fetch provider",
@@ -254,7 +262,7 @@ export function resolveProviderContractProvidersForPluginIds(
   return [
     ...new Map(
       [...allowed]
-        .flatMap(loadProviderContractEntriesForPluginId)
+        .flatMap(resolveProviderContractEntriesForPluginId)
         .filter((entry) => allowed.has(entry.pluginId))
         .map((entry) => [entry.provider.id, entry.provider]),
     ).values(),

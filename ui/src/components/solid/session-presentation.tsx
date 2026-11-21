@@ -8,11 +8,11 @@ import {
   SESSION_ICON_GLYPH_IDS,
   SESSION_ICON_SVG_DATA_URL_PREFIX,
 } from "../../../../packages/gateway-protocol/src/session-agent-status.js";
-import { registerChatToolLabelsEnglish } from "../../i18n/locales/en-chat-tool-labels.ts";
 import { resolveToolDisplayIcon } from "../../lib/chat/tool-display-icon.ts";
-import { t, registerEnglishCatalog } from "../../lib/reactive/i18n.ts";
+import { t } from "../../lib/reactive/i18n.ts";
 import type { SessionCreatedActor, SessionOwnerOption } from "../../lib/session-owner.ts";
 import {
+  childShowsParentWorking,
   summarizeSidebarSessionAttention,
   type SidebarRecentSession,
   type SidebarSessionAttention,
@@ -32,8 +32,6 @@ import { ChannelAvatar } from "./channel-avatar.tsx";
 import "../tooltip.ts";
 import { Icon, sessionIcon, sessionIconMask } from "./icon.tsx";
 import { SessionOwnerAvatar, SessionOwnerChip } from "./session-owner-chip.tsx";
-
-registerEnglishCatalog(registerChatToolLabelsEnglish);
 
 type SessionRunVisibility = typeof sessionRunVisibility;
 export { sessionRunVisibility };
@@ -94,6 +92,7 @@ export function SessionGlyph(props: {
   content: JSX.Element;
   running: boolean;
   queued?: boolean;
+  background?: boolean;
   runningLabel?: string;
   circular?: boolean;
   badge?: JSX.Element;
@@ -101,7 +100,14 @@ export function SessionGlyph(props: {
   runVisibility?: SessionRunVisibility;
 }) {
   const label = () =>
-    props.runningLabel ?? t(props.queued ? "sessionsView.statusQueued" : "sessionsView.activeRun");
+    props.runningLabel ??
+    t(
+      props.background
+        ? "sessionsView.backgroundWorkRunning"
+        : props.queued
+          ? "sessionsView.statusQueued"
+          : "sessionsView.activeRun",
+    );
   const glyph = () => (
     <span
       class={[
@@ -130,6 +136,7 @@ export function SessionGlyph(props: {
                     "session-glyph__ring",
                     {
                       "session-glyph__ring--queued": props.queued,
+                      "session-glyph__ring--background": props.background,
                       "session-run-indicator--offscreen": offscreen(),
                     },
                   ]}
@@ -139,7 +146,13 @@ export function SessionGlyph(props: {
               }
             >
               <svg
-                class={["session-glyph__trace", { "session-glyph__trace--queued": props.queued }]}
+                class={[
+                  "session-glyph__trace",
+                  {
+                    "session-glyph__trace--queued": props.queued,
+                    "session-glyph__trace--background": props.background,
+                  },
+                ]}
                 viewBox="-16 -11 32 22"
                 role="img"
                 aria-label={label()}
@@ -324,7 +337,7 @@ export function summarizeTeamSessionSlots(
   for (const row of rows) {
     const children = includeChildren ? row : row.subagentSummary;
     const visuallyActive = row.isRunVisuallyActive ?? row.hasActiveRun;
-    active += Number(visuallyActive) + (children?.runningChildCount ?? 0);
+    active += Number(childShowsParentWorking(row)) + (children?.runningChildCount ?? 0);
     queued += Number(visuallyActive && row.status === "queued") + (children?.queuedChildCount ?? 0);
     unread += Number(row.unread) + (children?.unreadChildCount ?? 0);
     failed ||= row.status === "failed" || row.status === "timeout";
@@ -470,10 +483,14 @@ export function renderSessionLeadingState(props: {
 }) {
   const session = () => props.session;
   const subagentsWorking = createMemo(
-    () => !props.trailingState && session().runningChildCount > 0,
+    () =>
+      !props.trailingState &&
+      (session().subagentSummary?.runningChildCount ?? session().runningChildCount) > 0,
   );
   const ownRunActive = () => session().isRunVisuallyActive ?? session().hasActiveRun;
-  const running = createMemo(() => ownRunActive() || subagentsWorking());
+  const background = () =>
+    !ownRunActive() && !subagentsWorking() && (session().backgroundProcessCount ?? 0) > 0;
+  const running = createMemo(() => ownRunActive() || subagentsWorking() || background());
   const ownRunQueued = createMemo(() => ownRunActive() && session().status === "queued");
   const showRun = createMemo(
     () => running() && !props.trailingState && session().attention.kind !== "question",
@@ -569,6 +586,7 @@ export function renderSessionLeadingState(props: {
         running={showRun()}
         queued={ownRunQueued() && !subagentsWorking()}
         runningLabel={runningLabel()}
+        background={background()}
         runVisibility={props.runVisibility}
         circular={!hasIcon() && Boolean(channelAvatarUrl() || hasOwner())}
         ring={
